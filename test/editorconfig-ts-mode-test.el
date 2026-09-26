@@ -1,5 +1,26 @@
 ;;; editorconfig-ts-mode-test.el --- Tests for editorconfig-ts-mode  -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 konomanoasa
+;;
+;; Permission is hereby granted, free of charge, to any person obtaining
+;; a copy of this software and associated documentation files (the
+;; "Software"), to deal in the Software without restriction, including
+;; without limitation the rights to use, copy, modify, merge, publish,
+;; distribute, sublicense, and/or sell copies of the Software, and to
+;; permit persons to whom the Software is furnished to do so, subject to
+;; the following conditions:
+;;
+;; The above copyright notice and this permission notice shall be
+;; included in all copies or substantial portions of the Software.
+;;
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+;; EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+;; MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+;; NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+;; LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+;; OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+;; WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 ;;; Code:
 
 (require 'ert)
@@ -104,7 +125,11 @@
 (ert-deftest editorconfig-ts-mode-selects-files ()
   (dolist (entry '(("/tmp/.editorconfig" . t)
                    (".editorconfig" . t)
-                   ("/tmp/foo.editorconfig" . nil)
+                   ("/tmp/test.editorconfig" . t)
+                   ("test.editorconfig" . t)
+                   ("/tmp/editorconfig" . nil)
+                   ("/tmp/test.editorconfig.txt" . nil)
+                   ("/tmp/test.editorconfigx" . nil)
                    ("/tmp/.editorconfig.other" . nil)))
     (with-temp-buffer
       (setq buffer-file-name (car entry))
@@ -128,12 +153,12 @@
 
 (ert-deftest editorconfig-ts-mode-classifies-delimiters ()
   (with-temp-buffer
-    (insert "root='([{}])'\\\n[{a,b}/[!x]/\\[/literal{word}]\nx=\"[{}]\"\n")
+    (insert "root='([{}])'\\\n[{a,b}/[!x]/\\[/literal{word}]\nx=\"[{}]\"`\n")
     (editorconfig-ts-mode)
     (dolist (entry '(("[{a" . 4) ("{a" . 4) ("}/[" . 5)
                      ("[!" . 4) ("]/" . 5) ("}]" . 1)
                      ("{word" . 1) ("'(" . 1) ("([" . 1)
-                     ("\\[" . 1) ("\"[" . 1)))
+                     ("\\[" . 1) ("\"[" . 1) ("`" . 1)))
       (should (= (editorconfig-ts-mode-test--syntax-class (car entry)) (cdr entry))))
     (should (= (syntax-class (syntax-after
                               (1+ (editorconfig-ts-mode-test--position "\\[")))) 1))
@@ -160,6 +185,44 @@
     (should (equal (buffer-string) "# x=y\n; note\n"))
     (uncomment-region (point-min) (point-max))
     (should (equal (buffer-string) "x=y\nnote\n"))))
+
+;;;; Electric Pair
+
+(ert-deftest editorconfig-ts-mode-pairs-delimiters-and-indents-on-return ()
+  (dolist (case '(("" ?\[ "[\n]" 0) ("[file" ?{ "[file{\n}" 0)))
+    (let ((electric-pair-pairs nil)
+          (electric-pair-open-newline-between-pairs t))
+      (with-temp-buffer
+        (editorconfig-ts-mode)
+        (setq-local indent-tabs-mode nil)
+        (electric-indent-local-mode 1)
+        (electric-pair-local-mode 1)
+        (insert (nth 0 case))
+        (let ((last-command-event (nth 1 case)))
+          (self-insert-command 1))
+        (should (= (char-after) (cdr (assq (nth 1 case) electric-pair-pairs))))
+        (call-interactively (key-binding (kbd "RET")))
+        (should (equal (buffer-string) (nth 2 case)))
+        (should (= (current-column) (nth 3 case)))))))
+
+(ert-deftest editorconfig-ts-mode-keeps-pair-preferences-local ()
+  (dolist (setting (list nil t (lambda () nil) (lambda () t)))
+    (let ((electric-pair-pairs '((?% . ?%) (?\[ . ?!) (?{ . ?@)))
+          (electric-pair-mode nil)
+          (electric-pair-open-newline-between-pairs setting))
+      (dolist (case '((?\[ "[\n!") (?{ "{\n@")))
+        (with-temp-buffer
+          (editorconfig-ts-mode)
+          (should-not electric-pair-mode)
+          (should (equal (car electric-pair-pairs) '(?% . ?%)))
+          (electric-indent-local-mode 1)
+          (electric-pair-local-mode 1)
+          (let ((last-command-event (car case)))
+            (self-insert-command 1))
+          (call-interactively (key-binding (kbd "RET")))
+          (should (equal (buffer-string) (cadr case)))))
+      (should (equal electric-pair-pairs '((?% . ?%) (?\[ . ?!) (?{ . ?@))))
+      (should (eq electric-pair-open-newline-between-pairs setting)))))
 
 ;;;; Font Lock
 
@@ -193,6 +256,64 @@
 
 ;;;; Navigation
 
+(ert-deftest editorconfig-ts-mode-navigates-editing-units ()
+  (with-temp-buffer
+    (insert "root = true\nother = false\n[*.{c,h}/[ab]]\n  indent_style = space tabs\n# tail\n\n[next]\nx=y\n")
+    (editorconfig-ts-mode)
+    (dolist (case '(("root" 0 1 "other" 0)
+                    ("root" 1 1 "root" 4)
+                    ("root" 4 -1 "root" 0)
+                    ("true" 1 1 "true" 4)
+                    ("true" 4 -1 "true" 0)
+                    ("[*." 0 1 "[next]" 0)
+                    ("[next]" 0 -1 "[*." 0)
+                    ("*." 0 1 "]]" 1)
+                    ("c,h" 0 1 "]]" 1)
+                    ("c,h" 1 -1 "*." 0)
+                    ("]]" 1 -1 "*." 0)
+                    ("  indent_style" 0 1 "# tail" 0)
+                    ("# tail" 0 -1 "  indent_style" 0)
+                    ("indent_style" 0 1 "indent_style" 12)
+                    ("indent_style" 12 -1 "indent_style" 0)
+                    ("space tabs" 3 1 "space tabs" 10)
+                    ("space tabs" 10 -1 "space tabs" 0)))
+      (ert-info ((format "%S" case))
+        (goto-char (+ (editorconfig-ts-mode-test--position (nth 0 case))
+                      (nth 1 case)))
+        (forward-sexp (nth 2 case))
+        (should (= (point)
+                   (+ (editorconfig-ts-mode-test--position (nth 3 case))
+                      (nth 4 case))))))
+    (goto-char (point-min))
+    (forward-sexp 3)
+    (should (= (point) (editorconfig-ts-mode-test--position "[next]")))
+    (backward-sexp 3)
+    (should (= (point) (point-min)))))
+
+(ert-deftest editorconfig-ts-mode-navigates-after-edits-and-narrowing ()
+  (with-temp-buffer
+    (insert "root=true\n[a]\nx=old\n[b]\ny=new\n")
+    (editorconfig-ts-mode)
+    (goto-char (editorconfig-ts-mode-test--position "old"))
+    (delete-char 3)
+    (insert "two words")
+    (backward-sexp)
+    (should (= (point) (editorconfig-ts-mode-test--position "two words")))
+    (forward-sexp)
+    (should (= (point) (+ (editorconfig-ts-mode-test--position "two words") 9)))
+    (narrow-to-region (editorconfig-ts-mode-test--position "[b]") (point-max))
+    (goto-char (point-min))
+    (forward-sexp)
+    (should (= (point) (point-max)))
+    (backward-sexp)
+    (should (= (point) (point-min)))
+    (goto-char (editorconfig-ts-mode-test--position "y=new"))
+    (beginning-of-defun)
+    (should (= (point) (point-min)))
+    (widen)
+    (backward-sexp)
+    (should (= (point) (editorconfig-ts-mode-test--position "[a]")))))
+
 (ert-deftest editorconfig-ts-mode-navigates-structures ()
   (with-temp-buffer
     (insert "root=true\n[a]\nx=y\n# tail\n\n[]\nz=w\n[unfinished")
@@ -215,19 +336,32 @@
 
 (ert-deftest editorconfig-ts-mode-indexes-definitions ()
   (with-temp-buffer
-    (insert "root=true\n[*.{js,ts}]\nx=y\n[]\n[unfinished")
+    (insert "root=true\n[*.{js,ts}]\nx=y\n[]\n[*.{js,ts}]\n[unfinished")
     (editorconfig-ts-mode)
     (let ((index (funcall imenu-create-index-function)))
       (should (equal (mapcar #'car (cdr (assoc "Section" index)))
-                     '("*.{js,ts}" "unfinished"))))
+                     '("*.{js,ts}" "*.{js,ts}" "unfinished")))
+      (let ((entries (cdr (assoc "Section" index))))
+        (should (< (cdr (nth 0 entries)) (cdr (nth 1 entries))))))
     (goto-char (editorconfig-ts-mode-test--position "unfinished"))
     (delete-region (point) (point-max))
     (insert "renamed]")
     (let ((index (funcall imenu-create-index-function)))
       (should (equal (mapcar #'car (cdr (assoc "Section" index)))
-                     '("*.{js,ts}" "renamed"))))))
+                     '("*.{js,ts}" "*.{js,ts}" "renamed"))))))
 
 ;;;; Indentation
+
+(ert-deftest editorconfig-ts-mode-indents-return-to-column-zero ()
+  (dolist (source '("[a]" "[*.{c,h}]" "key = two words" "key = {value}"
+                    "# note" "; note" ""))
+    (with-temp-buffer
+      (editorconfig-ts-mode)
+      (electric-indent-local-mode 1)
+      (insert source)
+      (call-interactively (key-binding (kbd "RET")))
+      (should (equal (buffer-string) (concat source "\n")))
+      (should (= (current-column) 0)))))
 
 (ert-deftest editorconfig-ts-mode-indents-structures ()
   (with-temp-buffer

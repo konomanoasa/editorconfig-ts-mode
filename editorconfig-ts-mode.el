@@ -34,22 +34,35 @@
 
 ;;; Code:
 
+(require 'elec-pair)
 (require 'treesit)
 
 (defgroup editorconfig-ts nil
   "Tree-sitter mode for EditorConfig."
   :group 'languages)
 
+;;;; Grammar
+
 (defconst editorconfig-ts-mode--grammar-sources
   '((editorconfig "https://github.com/konomanoasa/tree-sitter-editorconfig"
-                  :revision "v0.2.0"))
+                  :revision "v0.4.0"))
   "Tree-sitter grammar sources for EditorConfig.")
+
+(defun editorconfig-ts-mode--ensure-grammar (language)
+  "Ensure that the grammar for LANGUAGE is installed."
+  (let ((treesit-language-source-alist
+         (if (assq language treesit-language-source-alist)
+             treesit-language-source-alist
+           (cons (assq language editorconfig-ts-mode--grammar-sources)
+                 treesit-language-source-alist))))
+    (or (treesit-ensure-installed language)
+        (user-error "Tree-sitter grammar `%s' is unavailable" language))))
 
 ;;;; Syntax
 
 (defvar editorconfig-ts-mode-syntax-table
   (let ((table (make-syntax-table prog-mode-syntax-table)))
-    (dolist (character '(?# ?\; ?\" ?\' ?\\ ?\( ?\) ?\[ ?\] ?{ ?}))
+    (dolist (character '(?# ?\; ?\" ?\' ?` ?\\ ?\( ?\) ?\[ ?\] ?{ ?}))
       (modify-syntax-entry character "." table))
     (modify-syntax-entry ?\n ">" table)
     (modify-syntax-entry ?\r ">" table)
@@ -95,7 +108,7 @@
 
 ;;;;; Setup
 
-(defun editorconfig-ts-mode-syntax-setup ()
+(defun editorconfig-ts-mode-syntax--setup ()
   "Configure syntax handling for the current buffer."
   (setq-local syntax-propertize-function
               #'editorconfig-ts-mode-syntax--propertize)
@@ -105,6 +118,14 @@
   (setq-local comment-end "")
   (setq-local comment-start-skip "[#;][ \t\v\f]*")
   (setq-local comment-use-syntax t))
+
+;;;; Electric Pair
+
+(defun editorconfig-ts-mode-electric-pair--setup ()
+  "Configure electric pairing for the current buffer."
+  (setq-local electric-pair-pairs
+              (append electric-pair-pairs '((?\[ . ?\]) (?{ . ?}))))
+  (setq-local electric-pair-open-newline-between-pairs nil))
 
 ;;;; Font Lock
 
@@ -155,7 +176,7 @@
 
 ;;;;; Setup
 
-(defun editorconfig-ts-mode-font-lock-setup ()
+(defun editorconfig-ts-mode-font-lock--setup ()
   "Configure font lock for the current buffer."
   (setq-local treesit-font-lock-feature-list
               editorconfig-ts-mode-font-lock--feature-list)
@@ -164,68 +185,72 @@
 
 ;;;; Navigation
 
-(defconst editorconfig-ts-mode-thing-settings
-  '((editorconfig (defun "^section$")))
+(defun editorconfig-ts-mode-navigation--sexp-p (node)
+  "Return non-nil if NODE is an EditorConfig editing unit."
+  (and (< (treesit-node-start node) (treesit-node-end node))
+       (pcase (treesit-node-type node)
+         ((or "pair" "section") t)
+         ((or "key" "value")
+          (equal (treesit-node-type (treesit-node-parent node)) "pair"))
+         ("pattern"
+          (equal (treesit-node-type (treesit-node-parent node))
+                 "section_header")))))
+
+(defconst editorconfig-ts-mode-navigation--settings
+  '((editorconfig
+     (sexp editorconfig-ts-mode-navigation--sexp-p)
+     (defun "^section$")))
   "Tree-sitter thing definitions for EditorConfig.")
 
-(defun editorconfig-ts-mode-navigation-setup ()
+(defun editorconfig-ts-mode-navigation--setup ()
   "Configure navigation for the current buffer."
   (setq-local treesit-thing-settings
-              editorconfig-ts-mode-thing-settings)
+              editorconfig-ts-mode-navigation--settings)
   (setq-local treesit-defun-skipper nil))
 
 ;;;; Imenu
 
-(defconst editorconfig-ts-mode-imenu-settings
-  '(("Section" "^section$" editorconfig-ts-mode--defun-name nil))
-  "Tree-sitter Imenu settings for EditorConfig.")
-
-(defun editorconfig-ts-mode--defun-name (node)
+(defun editorconfig-ts-mode-imenu--name (node)
   "Return the source name of NODE, or nil if it has no name."
   (when (equal (treesit-node-type node) "section")
     (let* ((header (treesit-node-child-by-field-name node "header"))
            (name (and header (treesit-node-child-by-field-name header "name"))))
       (when name (treesit-node-text name t)))))
 
-(defun editorconfig-ts-mode-imenu-setup ()
+(defconst editorconfig-ts-mode-imenu--settings
+  '(("Section" "^section$" editorconfig-ts-mode-imenu--name nil))
+  "Tree-sitter Imenu settings for EditorConfig.")
+
+(defun editorconfig-ts-mode-imenu--setup ()
   "Configure Imenu for the current buffer."
   (setq-local treesit-defun-name-function
-              #'editorconfig-ts-mode--defun-name)
+              #'editorconfig-ts-mode-imenu--name)
   (setq-local treesit-simple-imenu-settings
-              editorconfig-ts-mode-imenu-settings))
+              editorconfig-ts-mode-imenu--settings))
 
 ;;;; Indentation
 
-(defconst editorconfig-ts-mode-indent-rules
+(defconst editorconfig-ts-mode-indent--rules
   '((editorconfig (catch-all column-0 0)))
   "Tree-sitter indentation rules for EditorConfig.")
 
-(defun editorconfig-ts-mode-indent-setup ()
+(defun editorconfig-ts-mode-indent--setup ()
   "Configure indentation for the current buffer."
   (setq-local treesit-simple-indent-rules
-              editorconfig-ts-mode-indent-rules))
+              editorconfig-ts-mode-indent--rules))
 
 ;;;; Mode
-
-(defun editorconfig-ts-mode--ensure-grammar (language)
-  "Ensure that the grammar for LANGUAGE is installed."
-  (let ((treesit-language-source-alist
-         (if (assq language treesit-language-source-alist)
-             treesit-language-source-alist
-           (cons (assq language editorconfig-ts-mode--grammar-sources)
-                 treesit-language-source-alist))))
-    (or (treesit-ensure-installed language)
-        (user-error "Tree-sitter grammar `%s' is unavailable" language))))
 
 (defun editorconfig-ts-mode--setup ()
   "Configure `editorconfig-ts-mode' in the current buffer."
   (editorconfig-ts-mode--ensure-grammar 'editorconfig)
   (setq-local treesit-primary-parser (treesit-parser-create 'editorconfig))
-  (editorconfig-ts-mode-syntax-setup)
-  (editorconfig-ts-mode-font-lock-setup)
-  (editorconfig-ts-mode-navigation-setup)
-  (editorconfig-ts-mode-imenu-setup)
-  (editorconfig-ts-mode-indent-setup)
+  (editorconfig-ts-mode-syntax--setup)
+  (editorconfig-ts-mode-electric-pair--setup)
+  (editorconfig-ts-mode-font-lock--setup)
+  (editorconfig-ts-mode-navigation--setup)
+  (editorconfig-ts-mode-imenu--setup)
+  (editorconfig-ts-mode-indent--setup)
   (treesit-major-mode-setup))
 
 ;;;###autoload
@@ -236,7 +261,7 @@
   (editorconfig-ts-mode--setup))
 
 ;;;###autoload
-(add-to-list 'auto-mode-alist '("\\(?:\\`\\|/\\)\\.editorconfig\\'" . editorconfig-ts-mode))
+(add-to-list 'auto-mode-alist '("\\.editorconfig\\'" . editorconfig-ts-mode))
 
 (provide 'editorconfig-ts-mode)
 

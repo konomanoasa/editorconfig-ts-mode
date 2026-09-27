@@ -35,6 +35,7 @@
 ;;; Code:
 
 (require 'elec-pair)
+(require 'newcomment)
 (require 'treesit)
 
 (defgroup editorconfig-ts nil
@@ -113,11 +114,26 @@
   (setq-local syntax-propertize-function
               #'editorconfig-ts-mode-syntax--propertize)
   (add-hook 'syntax-propertize-extend-region-functions
-            #'syntax-propertize-wholelines nil t)
+            #'syntax-propertize-wholelines nil t))
+
+;;;; Comment Commands
+
+(defun editorconfig-ts-mode-comment--insert-comment ()
+  "Insert a standalone comment at a line boundary."
+  (beginning-of-line)
+  (if (looking-at-p "[ \t]*$")
+      (delete-horizontal-space)
+    (save-excursion (insert "\n")))
+  (insert (comment-padright comment-start))
+  (indent-according-to-mode))
+
+(defun editorconfig-ts-mode-comment--setup ()
+  "Configure comment commands for the current buffer."
   (setq-local comment-start "# ")
   (setq-local comment-end "")
   (setq-local comment-start-skip "[#;][ \t\v\f]*")
-  (setq-local comment-use-syntax t))
+  (setq-local comment-use-syntax t)
+  (setq-local comment-insert-comment-function #'editorconfig-ts-mode-comment--insert-comment))
 
 ;;;; Electric Pair
 
@@ -246,6 +262,7 @@
   (editorconfig-ts-mode--ensure-grammar 'editorconfig)
   (setq-local treesit-primary-parser (treesit-parser-create 'editorconfig))
   (editorconfig-ts-mode-syntax--setup)
+  (editorconfig-ts-mode-comment--setup)
   (editorconfig-ts-mode-electric-pair--setup)
   (editorconfig-ts-mode-font-lock--setup)
   (editorconfig-ts-mode-navigation--setup)

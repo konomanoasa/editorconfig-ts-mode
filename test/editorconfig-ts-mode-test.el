@@ -436,10 +436,53 @@
 
 ;;;; Updates
 
+(ert-deftest editorconfig-ts-mode-reparses-a-bom-moved-to-buffer-start ()
+  (pcase-dolist (`(,language ,file ,properties ,prefix ,body ,fragment ,face)
+                 '((editorconfig "test.editorconfig" "" "root = true\n" "# note\n" "note" font-lock-comment-face)))
+    (dolist (narrow '(nil t))
+      (ert-info ((format "%s, narrowed: %s" language narrow))
+        (let ((default-directory
+               (file-name-as-directory (make-temp-file "editorconfig-ts-mode-" t))))
+          (unwind-protect
+              (progn
+                (with-temp-file (expand-file-name ".editorconfig")
+                  (insert "root = true\n[*]\n" properties))
+                (with-temp-buffer
+                  (setq buffer-file-name (expand-file-name file))
+                  (insert prefix "\ufeff" body)
+                  (let ((treesit-font-lock-level 4)) (editorconfig-ts-mode))
+                  (editorconfig-ts-mode-test--buffer-state)
+                  (when narrow
+                    (narrow-to-region 1 (+ 2 (length prefix))))
+                  (delete-region 1 (1+ (length prefix)))
+                  (widen)
+                  (should (eq (treesit-parser-language treesit-primary-parser) language))
+                  (should (equal (treesit-parser-list) (list treesit-primary-parser)))
+                  (let ((state (editorconfig-ts-mode-test--buffer-state))
+                        (tree (treesit-node-string
+                               (treesit-parser-root-node treesit-primary-parser)))
+                        (source (buffer-substring-no-properties (point-min) (point-max)))
+                        (filename buffer-file-name))
+                    (should (equal source (concat "\ufeff" body)))
+                    (should-not (get-text-property 1 'face))
+                    (goto-char (point-min))
+                    (search-forward fragment)
+                    (should (eq (get-text-property (1- (point)) 'face) face))
+                    (with-temp-buffer
+                      (setq buffer-file-name filename)
+                      (insert source)
+                      (let ((treesit-font-lock-level 4)) (editorconfig-ts-mode))
+                      (should (equal state (editorconfig-ts-mode-test--buffer-state)))
+                      (should (equal tree (treesit-node-string
+                                           (treesit-parser-root-node treesit-primary-parser))))))))
+            (delete-directory default-directory t)))))))
+
 (ert-deftest editorconfig-ts-mode-updates-like-fresh-buffer ()
   (pcase-dolist (`(,source ,old ,new ,fragment ,face)
                  '(("[a\\]\n" "a\\" "a\\*" "\\*" font-lock-escape-face)
-                   ("[*.c]\n" "*.c" "*.{c,h}" "{" font-lock-bracket-face)))
+                   ("[*.c]\n" "*.c" "*.{c,h}" "{" font-lock-bracket-face)
+                   ("[*.c]\r" "\r" "\r\nindent_style=space\n" "indent_style" font-lock-property-name-face)
+                   ("[{a*b}]\n" "a*b" "a*b,c" "*" font-lock-constant-face)))
     (ert-info ((format "%S: %S -> %S" source old new))
       (with-temp-buffer
 

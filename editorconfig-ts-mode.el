@@ -46,7 +46,7 @@
 
 (defconst editorconfig-ts-mode--grammar-sources
   '((editorconfig "https://github.com/konomanoasa/tree-sitter-editorconfig"
-                  :revision "v0.4.0"))
+                  :revision "v0.5.0"))
   "Tree-sitter grammar sources for EditorConfig.")
 
 (defun editorconfig-ts-mode--ensure-grammar (language)
@@ -58,6 +58,24 @@
                  treesit-language-source-alist))))
     (or (treesit-ensure-installed language)
         (user-error "Tree-sitter grammar `%s' is unavailable" language))))
+
+(defun editorconfig-ts-mode--after-change (beg _end old-length)
+  "Reparse a BOM moved to the start by an edit at BEG of OLD-LENGTH."
+  (when (and (= beg 1) (> old-length 0))
+    (save-restriction
+      (widen)
+      (when (eq (char-after 1) #xfeff)
+        (let* ((parser treesit-primary-parser)
+               (language (treesit-parser-language parser))
+               (notifiers (treesit-parser-notifiers parser))
+               (level (treesit-parser-embed-level parser)))
+          (treesit-parser-delete parser)
+          (setq treesit-primary-parser (treesit-parser-create language))
+          (treesit-parser-set-embed-level treesit-primary-parser level)
+          (dolist (notifier notifiers)
+            (treesit-parser-add-notifier treesit-primary-parser notifier))
+          (syntax-ppss-flush-cache 1)
+          (font-lock-flush))))))
 
 ;;;; Syntax
 
@@ -268,7 +286,8 @@
   (editorconfig-ts-mode-navigation--setup)
   (editorconfig-ts-mode-imenu--setup)
   (editorconfig-ts-mode-indent--setup)
-  (treesit-major-mode-setup))
+  (treesit-major-mode-setup)
+  (add-hook 'after-change-functions #'editorconfig-ts-mode--after-change nil t))
 
 ;;;###autoload
 (define-derived-mode editorconfig-ts-mode prog-mode "EditorConfig-TS"

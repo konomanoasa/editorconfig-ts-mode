@@ -35,6 +35,22 @@
 
 ;;;; Helpers
 
+(defmacro editorconfig-ts-mode-test--with-file (file properties source &rest body)
+  "Evaluate BODY with SOURCE in FILE using EditorConfig PROPERTIES."
+  (declare (indent 3) (debug (form form form body)))
+  `(let ((default-directory
+          (file-name-as-directory (make-temp-file "editorconfig-ts-mode-" t))))
+     (unwind-protect
+         (progn
+           (with-temp-file (expand-file-name ".editorconfig")
+             (insert "root = true\n[*]\n" ,properties))
+           (with-temp-buffer
+             (setq buffer-file-name (expand-file-name ,file))
+             (insert ,source)
+             (editorconfig-ts-mode)
+             ,@body))
+       (delete-directory default-directory t))))
+
 (defun editorconfig-ts-mode-test--position (fragment &optional line)
   (save-excursion
     (goto-char (point-min))
@@ -68,15 +84,22 @@
         (push (list (get-text-property position 'face) (syntax-after position)) state)))
     (nreverse state)))
 
-(defun editorconfig-ts-mode-test--should-match-fresh-buffer (level)
+(defun editorconfig-ts-mode-test--should-match-fresh-buffer (&optional level compare-tree)
+  "Compare classifications at LEVEL and optionally COMPARE-TREE with fresh parsing."
   (let ((source (buffer-substring-no-properties (point-min) (point-max)))
         (state (editorconfig-ts-mode-test--buffer-state))
-        (file buffer-file-name))
+        (tree (when compare-tree
+                (treesit-node-string (treesit-parser-root-node treesit-primary-parser))))
+        (file buffer-file-name)
+        (level (or level treesit-font-lock-level)))
     (with-temp-buffer
       (setq buffer-file-name file)
       (insert source)
       (let ((treesit-font-lock-level level)) (editorconfig-ts-mode))
-      (should (equal state (editorconfig-ts-mode-test--buffer-state))))))
+      (should (equal state (editorconfig-ts-mode-test--buffer-state)))
+      (when compare-tree
+        (should (equal tree (treesit-node-string
+                             (treesit-parser-root-node treesit-primary-parser))))))))
 
 ;;;; Grammar
 
@@ -436,46 +459,51 @@
 
 ;;;; Updates
 
+(ert-deftest editorconfig-ts-mode-refreshes-edited-owners-without-parser-notifications ()
+  (pcase-dolist (`(,language ,file ,properties ,source ,fragment ,owner-start)
+                 '((editorconfig "test.editorconfig" "" "indent_style = space\n" "space" 1)))
+    (dolist (narrow '(nil t))
+      (ert-info ((format "%s, narrowed: %s" language narrow))
+        (let ((treesit-font-lock-level 4))
+          (editorconfig-ts-mode-test--with-file file properties source
+                                                (rename-buffer "editorconfig-ts-mode-test" t)
+                                                (let ((noninteractive nil)) (font-lock-mode 1))
+                                                (editorconfig-ts-mode-test--buffer-state)
+                                                (should (get-text-property owner-start 'fontified))
+                                                (let ((parser treesit-primary-parser))
+                                                  (should-not (treesit-node-check (treesit-parser-root-node parser) 'has-error))
+                                                  (dolist (notifier (treesit-parser-notifiers parser))
+                                                    (treesit-parser-remove-notifier parser notifier))
+                                                  (goto-char (editorconfig-ts-mode-test--position fragment))
+                                                  (when narrow
+                                                    (narrow-to-region (line-beginning-position) (line-end-position)))
+                                                  (insert "x")
+                                                  (widen)
+                                                  (should (eq parser treesit-primary-parser))
+                                                  (should-not (get-text-property owner-start 'fontified))
+                                                  (editorconfig-ts-mode-test--should-match-fresh-buffer 4 t))))))))
+
 (ert-deftest editorconfig-ts-mode-reparses-a-bom-moved-to-buffer-start ()
   (pcase-dolist (`(,language ,file ,properties ,prefix ,body ,fragment ,face)
                  '((editorconfig "test.editorconfig" "" "root = true\n" "# note\n" "note" font-lock-comment-face)))
     (dolist (narrow '(nil t))
       (ert-info ((format "%s, narrowed: %s" language narrow))
-        (let ((default-directory
-               (file-name-as-directory (make-temp-file "editorconfig-ts-mode-" t))))
-          (unwind-protect
-              (progn
-                (with-temp-file (expand-file-name ".editorconfig")
-                  (insert "root = true\n[*]\n" properties))
-                (with-temp-buffer
-                  (setq buffer-file-name (expand-file-name file))
-                  (insert prefix "\ufeff" body)
-                  (let ((treesit-font-lock-level 4)) (editorconfig-ts-mode))
-                  (editorconfig-ts-mode-test--buffer-state)
-                  (when narrow
-                    (narrow-to-region 1 (+ 2 (length prefix))))
-                  (delete-region 1 (1+ (length prefix)))
-                  (widen)
-                  (should (eq (treesit-parser-language treesit-primary-parser) language))
-                  (should (equal (treesit-parser-list) (list treesit-primary-parser)))
-                  (let ((state (editorconfig-ts-mode-test--buffer-state))
-                        (tree (treesit-node-string
-                               (treesit-parser-root-node treesit-primary-parser)))
-                        (source (buffer-substring-no-properties (point-min) (point-max)))
-                        (filename buffer-file-name))
-                    (should (equal source (concat "\ufeff" body)))
-                    (should-not (get-text-property 1 'face))
-                    (goto-char (point-min))
-                    (search-forward fragment)
-                    (should (eq (get-text-property (1- (point)) 'face) face))
-                    (with-temp-buffer
-                      (setq buffer-file-name filename)
-                      (insert source)
-                      (let ((treesit-font-lock-level 4)) (editorconfig-ts-mode))
-                      (should (equal state (editorconfig-ts-mode-test--buffer-state)))
-                      (should (equal tree (treesit-node-string
-                                           (treesit-parser-root-node treesit-primary-parser))))))))
-            (delete-directory default-directory t)))))))
+        (let ((treesit-font-lock-level 4))
+          (editorconfig-ts-mode-test--with-file file properties (concat prefix "\ufeff" body)
+                                                (editorconfig-ts-mode-test--buffer-state)
+                                                (when narrow (narrow-to-region 1 (+ 2 (length prefix))))
+                                                (delete-region 1 (1+ (length prefix)))
+                                                (widen)
+                                                (should (eq (treesit-parser-language treesit-primary-parser) language))
+                                                (should (equal (treesit-parser-list) (list treesit-primary-parser)))
+                                                (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                                                               (concat "\ufeff" body)))
+                                                (editorconfig-ts-mode-test--buffer-state)
+                                                (should-not (get-text-property 1 'face))
+                                                (goto-char (point-min))
+                                                (search-forward fragment)
+                                                (should (eq (get-text-property (1- (point)) 'face) face))
+                                                (editorconfig-ts-mode-test--should-match-fresh-buffer 4 t)))))))
 
 (ert-deftest editorconfig-ts-mode-updates-like-fresh-buffer ()
   (pcase-dolist (`(,source ,old ,new ,fragment ,face)

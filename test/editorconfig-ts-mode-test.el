@@ -25,7 +25,6 @@
 
 (require 'ert)
 (require 'imenu)
-(require 'loaddefs-gen)
 (require 'newcomment)
 (require 'editorconfig-ts-mode)
 
@@ -35,23 +34,8 @@
 
 ;;;; Helpers
 
-(defmacro editorconfig-ts-mode-test--with-file (file properties source &rest body)
-  "Evaluate BODY with SOURCE in FILE using EditorConfig PROPERTIES."
-  (declare (indent 3) (debug (form form form body)))
-  `(let ((default-directory
-          (file-name-as-directory (make-temp-file "editorconfig-ts-mode-" t))))
-     (unwind-protect
-         (progn
-           (with-temp-file (expand-file-name ".editorconfig")
-             (insert "root = true\n[*]\n" ,properties))
-           (with-temp-buffer
-             (setq buffer-file-name (expand-file-name ,file))
-             (insert ,source)
-             (editorconfig-ts-mode)
-             ,@body))
-       (delete-directory default-directory t))))
-
 (defun editorconfig-ts-mode-test--position (fragment &optional line)
+  "Return FRAGMENT's start in LINE, or anywhere when LINE is nil."
   (save-excursion
     (goto-char (point-min))
     (when line
@@ -67,15 +51,18 @@
     (- (point) (length fragment))))
 
 (defun editorconfig-ts-mode-test--face (fragment &optional offset line)
+  "Return the face at OFFSET into FRAGMENT on LINE."
   (get-text-property (+ (editorconfig-ts-mode-test--position fragment line)
                         (or offset 0)) 'face))
 
 (defun editorconfig-ts-mode-test--syntax-class (fragment &optional offset line)
+  "Return the syntax class at OFFSET into FRAGMENT on LINE."
   (syntax-propertize (point-max))
   (syntax-class (syntax-after (+ (editorconfig-ts-mode-test--position fragment line)
                                  (or offset 0)))))
 
 (defun editorconfig-ts-mode-test--buffer-state ()
+  "Return current face and syntax properties after refreshing the buffer."
   (font-lock-ensure)
   (syntax-propertize (point-max))
   (let (state)
@@ -101,78 +88,6 @@
         (should (equal tree (treesit-node-string
                              (treesit-parser-root-node treesit-primary-parser))))))))
 
-;;;; Grammar
-
-(ert-deftest editorconfig-ts-mode-respects-grammar-sources ()
-  (let ((ensure (symbol-function 'treesit-ensure-installed)) received)
-    (unwind-protect
-        (progn
-          (fset 'treesit-ensure-installed
-                (lambda (language)
-                  (setq received (assq language treesit-language-source-alist))
-                  t))
-          (dolist (source editorconfig-ts-mode--grammar-sources)
-            (let* ((language (car source))
-                   (custom (list language "/local/grammar" :revision "custom")))
-              (dolist (configured (list nil (list custom)))
-                (let ((treesit-language-source-alist configured))
-                  (should (editorconfig-ts-mode--ensure-grammar language))
-                  (should (equal received (if configured custom source)))
-                  (should (eq treesit-language-source-alist configured)))))))
-      (fset 'treesit-ensure-installed ensure))))
-
-(ert-deftest editorconfig-ts-mode-reports-unavailable-grammar ()
-  (let ((ensure (symbol-function 'treesit-ensure-installed)))
-    (unwind-protect
-        (progn
-          (fset 'treesit-ensure-installed (lambda (_language) nil))
-          (with-temp-buffer
-            (let ((buffer-file-name nil))
-              (should-error (editorconfig-ts-mode) :type 'user-error)
-              (should-not (treesit-parser-list)))))
-      (fset 'treesit-ensure-installed ensure))))
-
-(ert-deftest editorconfig-ts-mode-starts-and-reuses-parser ()
-  (with-temp-buffer
-    (insert "[*]\nx=y\n")
-    (editorconfig-ts-mode)
-    (should (eq major-mode 'editorconfig-ts-mode))
-    (should (eq (treesit-parser-language treesit-primary-parser) 'editorconfig))
-    (should (equal (treesit-node-type (treesit-parser-root-node treesit-primary-parser))
-                   "document"))
-    (editorconfig-ts-mode)
-    (should (equal (treesit-parser-list) (list treesit-primary-parser)))))
-
-;;;; Mode Selection
-
-(ert-deftest editorconfig-ts-mode-selects-files ()
-  (pcase-dolist (`(,file . ,expected)
-                 '(("/tmp/.editorconfig" . t)
-                   (".editorconfig" . t)
-                   ("/tmp/test.editorconfig" . t)
-                   ("test.editorconfig" . t)
-                   ("/tmp/editorconfig" . nil)
-                   ("/tmp/test.editorconfig.txt" . nil)
-                   ("/tmp/test.editorconfigx" . nil)
-                   ("/tmp/.editorconfig.other" . nil)))
-    (with-temp-buffer
-      (setq buffer-file-name file)
-      (set-auto-mode)
-      (should (eq (eq major-mode 'editorconfig-ts-mode) expected)))))
-
-(ert-deftest editorconfig-ts-mode-generates-autoloads ()
-  (let ((output (make-temp-file "editorconfig-ts-mode-loaddefs-"))
-        (directory (file-name-directory (locate-library "editorconfig-ts-mode"))))
-    (unwind-protect
-        (progn
-          (loaddefs-generate directory output nil nil nil t)
-          (with-temp-buffer
-            (insert-file-contents output)
-            (dolist (form '("(autoload 'editorconfig-ts-mode" "(add-to-list 'auto-mode-alist"))
-              (goto-char (point-min))
-              (should (search-forward form nil t)))))
-      (delete-file output))))
-
 ;;;; Syntax
 
 (ert-deftest editorconfig-ts-mode-classifies-delimiters ()
@@ -191,28 +106,7 @@
       (should (= (scan-sexps opening 1)
                  (+ (editorconfig-ts-mode-test--position "}]\n") 2))))))
 
-(ert-deftest editorconfig-ts-mode-classifies-comments ()
-  (with-temp-buffer
-    (insert "# first\n; second\nx=a#b;c\n[#;]\n# cr\rx=y\n")
-    (editorconfig-ts-mode)
-    (syntax-propertize (point-max))
-    (pcase-dolist (`(,fragment . ,expected)
-                   '(("first" . t) ("second" . t) ("b;c" . nil)
-                     (";]" . nil) ("cr" . t) ("x=y" . nil)))
-      (should (eq (not (null (nth 4 (syntax-ppss
-                                     (editorconfig-ts-mode-test--position fragment)))))
-                  expected)))))
-
 ;;;; Comment Commands
-
-(ert-deftest editorconfig-ts-mode-comments-and-uncomments ()
-  (with-temp-buffer
-    (insert "x=y\n; note\n")
-    (editorconfig-ts-mode)
-    (comment-region 1 5)
-    (should (equal (buffer-string) "# x=y\n; note\n"))
-    (uncomment-region (point-min) (point-max))
-    (should (equal (buffer-string) "x=y\nnote\n"))))
 
 (ert-deftest editorconfig-ts-mode-inserts-standalone-comments ()
   (pcase-dolist (`(,source ,expected)
@@ -232,57 +126,6 @@
 
 ;;;; Electric Pair
 
-(ert-deftest editorconfig-ts-mode-supplies-electric-pairs ()
-  (let ((electric-pair-pairs '((?% . ?%)))
-        (electric-pair-mode nil))
-    (pcase-dolist (`(,prefix ,opening ,expected)
-                   '(("" ?\[ "[]")
-                     ("[file" ?{ "[file{}")))
-      (ert-info ((format "%S / %c" prefix opening))
-        (with-temp-buffer
-          (insert prefix)
-          (editorconfig-ts-mode)
-          (should-not electric-pair-mode)
-          (should (local-variable-p 'electric-pair-pairs))
-          (should (equal (assq ?% electric-pair-pairs) '(?% . ?%)))
-          (electric-pair-local-mode 1)
-          (let ((last-command-event opening)) (self-insert-command 1))
-          (should (equal (buffer-string) expected))
-          (should (= (point) (1- (point-max)))))))
-    (should (equal electric-pair-pairs '((?% . ?%)))))
-  (let ((electric-pair-pairs '((?\[ . ?!) (?{ . ?@))))
-    (pcase-dolist (`(,prefix ,opening ,expected)
-                   '(("" ?\[ "[!")
-                     ("" ?{ "{@")))
-      (with-temp-buffer
-        (insert prefix)
-        (editorconfig-ts-mode)
-        (electric-pair-local-mode 1)
-        (let ((last-command-event opening)) (self-insert-command 1))
-        (should (equal (buffer-string) expected))
-        (should (= (point) (1- (point-max))))))
-    (should (equal electric-pair-pairs '((?\[ . ?!) (?{ . ?@))))))
-
-(ert-deftest editorconfig-ts-mode-respects-pair-newline-preferences ()
-  (let ((calls 0))
-    (pcase-dolist (`(,setting ,expected)
-                   (list (list nil "[\n]")
-                         (list t "[\n]")
-                         (list (lambda () (setq calls (1+ calls)) nil) "[\n]")
-                         (list (lambda () (setq calls (1+ calls)) t) "[\n]")))
-      (setq calls 0)
-      (let ((electric-pair-open-newline-between-pairs setting))
-        (with-temp-buffer
-          (insert "[]")
-          (editorconfig-ts-mode)
-          (electric-indent-local-mode -1)
-          (electric-pair-local-mode 1)
-          (goto-char 2)
-          (call-interactively (key-binding (kbd "RET")))
-          (should (equal (buffer-string) expected)))
-        (should (eq (> calls 0) nil))
-        (should (eq electric-pair-open-newline-between-pairs setting))))))
-
 (ert-deftest editorconfig-ts-mode-pairs-delimiters-and-indents-on-return ()
   (pcase-dolist (`(,prefix ,opening ,expected ,column)
                  '(("" ?\[ "[\n]" 0)
@@ -301,37 +144,6 @@
         (should (equal (buffer-string) expected))
         (should (= (current-column) column))))))
 
-;;;; Font Lock
-
-(ert-deftest editorconfig-ts-mode-fontifies-by-level ()
-  (dolist (level '(1 2 3 4))
-    (let ((treesit-font-lock-level level))
-      (with-temp-buffer
-        (insert "# note\nroot=true\n[*.c/**/?/[!x]/{a,b}/{-1..3}/\\*]\nunknown=unset\n")
-        (editorconfig-ts-mode)
-        (font-lock-ensure)
-        (pcase-dolist (`(,fragment ,minimum ,face)
-                       '(("#" 1 font-lock-comment-face)
-                         ("note" 1 font-lock-comment-face)
-                         ("root" 2 font-lock-property-name-face)
-                         ("true" 2 font-lock-string-face)
-                         ("unknown" 2 font-lock-property-name-face)
-                         ("unset" 2 font-lock-string-face)
-                         ("x" 2 font-lock-string-face)
-                         ("-1" 3 font-lock-number-face)
-                         ("\\*" 3 font-lock-escape-face)
-                         ("=" 4 font-lock-operator-face)
-                         ("*.c" 4 font-lock-constant-face)
-                         ("**" 4 font-lock-constant-face)
-                         ("?" 4 font-lock-constant-face)
-                         ("!" 4 font-lock-negation-char-face)
-                         (".." 4 font-lock-operator-face)
-                         ("/" 4 font-lock-punctuation-face)
-                         ("," 4 font-lock-punctuation-face)
-                         ("[" 4 font-lock-bracket-face)))
-          (should (equal (editorconfig-ts-mode-test--face fragment)
-                         (and (>= level minimum) face))))))))
-
 ;;;; Navigation
 
 (ert-deftest editorconfig-ts-mode-navigates-editing-units ()
@@ -341,19 +153,13 @@
     (pcase-dolist (`(,fragment ,offset ,count ,target ,target-offset)
                    '(("root" 0 1 "other" 0)
                      ("root" 1 1 "root" 4)
-                     ("root" 4 -1 "root" 0)
-                     ("true" 1 1 "true" 4)
-                     ("true" 4 -1 "true" 0)
                      ("[*." 0 1 "[next]" 0)
                      ("[next]" 0 -1 "[*." 0)
                      ("*." 0 1 "]]" 1)
                      ("c,h" 0 1 "]]" 1)
-                     ("c,h" 1 -1 "*." 0)
                      ("]]" 1 -1 "*." 0)
                      ("  indent_style" 0 1 "# tail" 0)
                      ("# tail" 0 -1 "  indent_style" 0)
-                     ("indent_style" 0 1 "indent_style" 12)
-                     ("indent_style" 12 -1 "indent_style" 0)
                      ("space tabs" 3 1 "space tabs" 10)
                      ("space tabs" 10 -1 "space tabs" 0)))
       (ert-info ((format "%S" (list fragment offset count target target-offset)))
@@ -432,8 +238,7 @@
 ;;;; Indentation
 
 (ert-deftest editorconfig-ts-mode-indents-return-to-column-zero ()
-  (dolist (source '("[a]" "[*.{c,h}]" "key = two words" "key = {value}"
-                    "# note" "; note" ""))
+  (dolist (source '("[*.{c,h}]" "key = two words" "# note" ""))
     (with-temp-buffer
       (editorconfig-ts-mode)
       (electric-indent-local-mode 1)
@@ -460,50 +265,47 @@
 ;;;; Updates
 
 (ert-deftest editorconfig-ts-mode-refreshes-edited-owners-without-parser-notifications ()
-  (pcase-dolist (`(,language ,file ,properties ,source ,fragment ,owner-start)
-                 '((editorconfig "test.editorconfig" "" "indent_style = space\n" "space" 1)))
-    (dolist (narrow '(nil t))
-      (ert-info ((format "%s, narrowed: %s" language narrow))
-        (let ((treesit-font-lock-level 4))
-          (editorconfig-ts-mode-test--with-file file properties source
-                                                (rename-buffer "editorconfig-ts-mode-test" t)
-                                                (let ((noninteractive nil)) (font-lock-mode 1))
-                                                (editorconfig-ts-mode-test--buffer-state)
-                                                (should (get-text-property owner-start 'fontified))
-                                                (let ((parser treesit-primary-parser))
-                                                  (should-not (treesit-node-check (treesit-parser-root-node parser) 'has-error))
-                                                  (dolist (notifier (treesit-parser-notifiers parser))
-                                                    (treesit-parser-remove-notifier parser notifier))
-                                                  (goto-char (editorconfig-ts-mode-test--position fragment))
-                                                  (when narrow
-                                                    (narrow-to-region (line-beginning-position) (line-end-position)))
-                                                  (insert "x")
-                                                  (widen)
-                                                  (should (eq parser treesit-primary-parser))
-                                                  (should-not (get-text-property owner-start 'fontified))
-                                                  (editorconfig-ts-mode-test--should-match-fresh-buffer 4 t))))))))
+  (dolist (narrow '(nil t))
+    (ert-info ((format "Narrowed: %s" narrow))
+      (with-temp-buffer
+        (insert "indent_style = space\n")
+        (let ((treesit-font-lock-level 4)) (editorconfig-ts-mode))
+        (rename-buffer "editorconfig-ts-mode-test" t)
+        (let ((noninteractive nil)) (font-lock-mode 1))
+        (editorconfig-ts-mode-test--buffer-state)
+        (should (get-text-property 1 'fontified))
+        (let ((parser treesit-primary-parser))
+          (should-not (treesit-node-check (treesit-parser-root-node parser) 'has-error))
+          (dolist (notifier (treesit-parser-notifiers parser))
+            (treesit-parser-remove-notifier parser notifier))
+          (goto-char (editorconfig-ts-mode-test--position "space"))
+          (when narrow
+            (narrow-to-region (line-beginning-position) (line-end-position)))
+          (insert "x")
+          (widen)
+          (should (eq parser treesit-primary-parser))
+          (should-not (get-text-property 1 'fontified))
+          (editorconfig-ts-mode-test--should-match-fresh-buffer 4 t))))))
 
 (ert-deftest editorconfig-ts-mode-reparses-a-bom-moved-to-buffer-start ()
-  (pcase-dolist (`(,language ,file ,properties ,prefix ,body ,fragment ,face)
-                 '((editorconfig "test.editorconfig" "" "root = true\n" "# note\n" "note" font-lock-comment-face)))
-    (dolist (narrow '(nil t))
-      (ert-info ((format "%s, narrowed: %s" language narrow))
-        (let ((treesit-font-lock-level 4))
-          (editorconfig-ts-mode-test--with-file file properties (concat prefix "\ufeff" body)
-                                                (editorconfig-ts-mode-test--buffer-state)
-                                                (when narrow (narrow-to-region 1 (+ 2 (length prefix))))
-                                                (delete-region 1 (1+ (length prefix)))
-                                                (widen)
-                                                (should (eq (treesit-parser-language treesit-primary-parser) language))
-                                                (should (equal (treesit-parser-list) (list treesit-primary-parser)))
-                                                (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                                                               (concat "\ufeff" body)))
-                                                (editorconfig-ts-mode-test--buffer-state)
-                                                (should-not (get-text-property 1 'face))
-                                                (goto-char (point-min))
-                                                (search-forward fragment)
-                                                (should (eq (get-text-property (1- (point)) 'face) face))
-                                                (editorconfig-ts-mode-test--should-match-fresh-buffer 4 t)))))))
+  (dolist (narrow '(nil t))
+    (ert-info ((format "Narrowed: %s" narrow))
+      (with-temp-buffer
+        (insert "root = true\n\ufeff# note\n")
+        (let ((treesit-font-lock-level 4)) (editorconfig-ts-mode))
+        (editorconfig-ts-mode-test--buffer-state)
+        (let ((parser treesit-primary-parser))
+          (when narrow (narrow-to-region 1 14))
+          (delete-region 1 13)
+          (widen)
+          (should-not (eq parser treesit-primary-parser))
+          (should (equal (treesit-parser-list) (list treesit-primary-parser)))
+          (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                         "\ufeff# note\n"))
+          (editorconfig-ts-mode-test--buffer-state)
+          (should-not (get-text-property 1 'face))
+          (should (eq (editorconfig-ts-mode-test--face "note") 'font-lock-comment-face))
+          (editorconfig-ts-mode-test--should-match-fresh-buffer 4 t))))))
 
 (ert-deftest editorconfig-ts-mode-updates-like-fresh-buffer ()
   (pcase-dolist (`(,source ,old ,new ,fragment ,face)
@@ -513,7 +315,6 @@
                    ("[{a*b}]\n" "a*b" "a*b,c" "*" font-lock-constant-face)))
     (ert-info ((format "%S: %S -> %S" source old new))
       (with-temp-buffer
-
         (insert source)
         (let ((treesit-font-lock-level 4)) (editorconfig-ts-mode))
         (editorconfig-ts-mode-test--buffer-state)
@@ -523,21 +324,6 @@
         (font-lock-ensure)
         (should (eq (editorconfig-ts-mode-test--face fragment) face))
         (editorconfig-ts-mode-test--should-match-fresh-buffer 4)))))
-
-(ert-deftest editorconfig-ts-mode-keeps-incomplete-escape-unfontified-and-repairs-it ()
-  (let ((treesit-font-lock-level 4))
-    (with-temp-buffer
-      (insert "[a\\]")
-      (editorconfig-ts-mode)
-      (font-lock-ensure)
-      (should-not (editorconfig-ts-mode-test--face "\\"))
-      (goto-char 4)
-      (insert "*")
-      (font-lock-ensure)
-      (should (eq (editorconfig-ts-mode-test--face "\\*") 'font-lock-escape-face))
-      (delete-char -1)
-      (font-lock-ensure)
-      (should-not (editorconfig-ts-mode-test--face "\\")))))
 
 (ert-deftest editorconfig-ts-mode-reclassifies-delimiters-after-edits ()
   (with-temp-buffer

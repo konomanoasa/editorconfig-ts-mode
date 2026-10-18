@@ -46,7 +46,7 @@
 
 (defconst editorconfig-ts-mode--grammar-sources
   '((editorconfig "https://github.com/konomanoasa/tree-sitter-editorconfig"
-                  :revision "v0.5.1"))
+                  :revision "v0.5.2"))
   "Tree-sitter grammar sources for EditorConfig.")
 
 (defun editorconfig-ts-mode--ensure-grammar (language)
